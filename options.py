@@ -2,8 +2,10 @@ from __future__ import absolute_import, division, print_function
 
 import os
 import argparse
+import os.path as osp
 
-file_dir = os.path.dirname(__file__)  # the directory that options.py resides in
+#.replace("\\","/") 이거 추가함
+file_dir = os.path.dirname(__file__).replace("\\","/")  # the directory that options.py resides in
 
 
 class LiteMonoOptions:
@@ -14,17 +16,17 @@ class LiteMonoOptions:
         self.parser.add_argument("--data_path",
                                  type=str,
                                  help="path to the training data",
-                                 default=os.path.join(file_dir, "kitti_data"))
+                                 default=osp.join(file_dir, "kitti_data").replace("\\","/"))
         self.parser.add_argument("--log_dir",
                                  type=str,
                                  help="log directory",
-                                 default="./tmp")
+                                 default=osp.join(file_dir, "experiments", "logs"))
 
         # TRAINING options
         self.parser.add_argument("--model_name",
                                  type=str,
                                  help="the name of the folder to save the model in",
-                                 default="lite-mono")
+                                 default="batch_12")
         self.parser.add_argument("--split",
                                  type=str,
                                  help="which training split to use",
@@ -55,7 +57,8 @@ class LiteMonoOptions:
                                  choices=["kitti", "kitti_odom", "kitti_depth", "kitti_test"])
         self.parser.add_argument("--png",
                                  help="if set, trains from raw KITTI png files (instead of jpgs)",
-                                 action="store_true")
+                                 action="store_true",
+                                 default=True) #수정
         self.parser.add_argument("--height",
                                  type=int,
                                  help="input image height",
@@ -72,7 +75,7 @@ class LiteMonoOptions:
                                  nargs="+",
                                  type=int,
                                  help="scales used in the loss",
-                                 default=[0, 1, 2])
+                                 default=[0, 1, 2]) #[0, 1, 2]
         self.parser.add_argument("--min_depth",
                                  type=float,
                                  help="minimum depth",
@@ -99,7 +102,7 @@ class LiteMonoOptions:
         self.parser.add_argument("--batch_size",
                                  type=int,
                                  help="batch size",
-                                 default=16)
+                                 default=12) # default=16
         self.parser.add_argument("--lr",
                                  nargs="+",
                                  type=float,
@@ -111,7 +114,7 @@ class LiteMonoOptions:
         self.parser.add_argument("--num_epochs",
                                  type=int,
                                  help="number of epochs",
-                                 default=50)
+                                 default=80) #50
         self.parser.add_argument("--scheduler_step_size",
                                  type=int,
                                  help="step size of the scheduler",

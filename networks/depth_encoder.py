@@ -62,8 +62,12 @@ class XCA(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop)
 
     def forward(self, x):
+        # (B, C, H, W) ---> convolution operation
+        # ViT : Patch --> position embedding 
+        # (B, C, H, W) X --> (B, HxW, C) --> matrix multiplication --> Transpose (4, 3)--> (3, 4)
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads)
+        # 144 --> 3, 8, 6
         qkv = qkv.permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
@@ -295,6 +299,9 @@ class LiteMono(nn.Module):
     """
     Lite-Mono
     """
+    # global_block=[1, 1, 1], global_block_type=['LGFI', 'LGFI', 'LGFI']
+    # use_pos_embd_xca=[True, False, False] 위치 임베딩 -> 초기 스테이지에서는 위치 정보가 중요 why? 뒤로 갈수록 위치 정보가 덜 중요 -> 해상도가 낮아져서 픽셀당 정보가 많아서?
+    # heads=[8, 8, 8] 무슨의미인지 모르겠음 
     def __init__(self, in_chans=3, model='lite-mono', height=192, width=640,
                  global_block=[1, 1, 1], global_block_type=['LGFI', 'LGFI', 'LGFI'],
                  drop_path_rate=0.2, layer_scale_init_value=1e-6, expan_ratio=6,
@@ -303,10 +310,17 @@ class LiteMono(nn.Module):
         super().__init__()
 
         if model == 'lite-mono':
+            # self.num_ch_enc = np.array([48, 80, 128]) 무슨 의미지인 모르겠음 
             self.num_ch_enc = np.array([48, 80, 128])
+            # Feature map - channel:48 ==> (8, 48, 64, 64)
+            # 즉, 48은 convolution kernel의 개수 
+            
+            # self.depth = [4, 4, 10]
             self.depth = [4, 4, 10]
+            # self.dims = [48, 80, 128]
             self.dims = [48, 80, 128]
             if height == 192 and width == 640:
+                # self.dilation = [[1, 2, 3], [1, 2, 3], [1, 2, 3, 1, 2, 3, 2, 4, 6]]
                 self.dilation = [[1, 2, 3], [1, 2, 3], [1, 2, 3, 1, 2, 3, 2, 4, 6]]
             elif height == 320 and width == 1024:
                 self.dilation = [[1, 2, 5], [1, 2, 5], [1, 2, 5, 1, 2, 5, 2, 4, 10]]
@@ -358,15 +372,18 @@ class LiteMono(nn.Module):
         for i in range(1, 5):
             self.input_downsample.append(AvgPool(i))
 
+        # for i in range(2):
         for i in range(2):
             downsample_layer = nn.Sequential(
                 Conv(self.dims[i]*2+3, self.dims[i+1], kSize=3, stride=2, padding=1, bn_act=False),
             )
             self.downsample_layers.append(downsample_layer)
 
+        # ------------------------------ Stage 시작 ------------------------------ 
         self.stages = nn.ModuleList()
         dp_rates = [x.item() for x in torch.linspace(0, drop_path_rate, sum(self.depth))]
         cur = 0
+        # for i in range(3):
         for i in range(3):
             stage_blocks = []
             for j in range(self.depth[i]):
@@ -409,6 +426,7 @@ class LiteMono(nn.Module):
         x_down = []
         for i in range(4):
             x_down.append(self.input_downsample[i](x))
+        
 
         tmp_x = []
         x = self.downsample_layers[0](x)
@@ -421,6 +439,12 @@ class LiteMono(nn.Module):
         tmp_x.append(x)
         features.append(x)
 
+        # feature map 1 : (8, 48, 48, 160)
+        # feature map 2 : (8, 80, 24, 80)
+        # feature map 3 : (8, 128, 12, 40)
+        # feature map 4 : (8, x, 6, 20) 생성.
+        
+        # for i in range(1, 3):
         for i in range(1, 3):
             tmp_x.append(x_down[i])
             x = torch.cat(tmp_x, dim=1)
@@ -433,7 +457,7 @@ class LiteMono(nn.Module):
             tmp_x.append(x)
 
             features.append(x)
-
+        
         return features
 
     def forward(self, x):
