@@ -8,6 +8,8 @@ from tensorboardX import SummaryWriter
 
 import json
 
+import matplotlib.pyplot as plt
+
 from utils import *
 from kitti_utils import *
 from layers import *
@@ -15,16 +17,27 @@ from layers import *
 import datasets
 import networks
 from linear_warmup_cosine_annealing_warm_restarts_weight_decay import ChainedScheduler
+from torchprofile import profile_macs
+
+
+# # FLOPs 계산
+# flops = FlopCountAnalysis(model, input_tensor)
+# print(f"FLOPs: {flops.total() / 1e9} GFLOPs")  # Giga FLOPs
+
+# # 파라미터 수 출력
+# print(parameter_count_table(model))
 
 
 # torch.backends.cudnn.benchmark = True
 
+output_file = "output_log.txt"
 
 def time_sync():
     # PyTorch-accurate time
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     return time.time()
+
 
 
 class Trainer:
@@ -35,6 +48,7 @@ class Trainer:
         # checking height and width are multiples of 32
         assert self.opt.height % 32 == 0, "'height' must be a multiple of 32"
         assert self.opt.width % 32 == 0, "'width' must be a multiple of 32"
+        
 
         self.models = {}
         self.models_pose = {}
@@ -55,18 +69,22 @@ class Trainer:
         if self.opt.use_stereo:
             self.opt.frame_ids.append("s")
 
+        # ------------------------------ Encoder build ------------------------------
         self.models["encoder"] = networks.LiteMono(model=self.opt.model,
                                                    drop_path_rate=self.opt.drop_path,
                                                    width=self.opt.width, height=self.opt.height)
 
         self.models["encoder"].to(self.device)
         self.parameters_to_train += list(self.models["encoder"].parameters())
-
+        # --------------------------------------------------------------------------------
+        
+        # ------------------------------ Decoder build ------------------------------
         self.models["depth"] = networks.DepthDecoder(self.models["encoder"].num_ch_enc,
                                                      self.opt.scales)
         self.models["depth"].to(self.device)
         self.parameters_to_train += list(self.models["depth"].parameters())
-
+        # --------------------------------------------------------------------------------
+        
         if self.use_pose_net:
             if self.opt.pose_model_type == "separate_resnet":
                 self.models_pose["pose_encoder"] = networks.ResnetEncoder(
@@ -105,6 +123,7 @@ class Trainer:
             self.models["predictive_mask"].to(self.device)
             self.parameters_to_train += list(self.models["predictive_mask"].parameters())
 
+        # Optimization Algo
         self.model_optimizer = optim.AdamW(self.parameters_to_train, self.opt.lr[0], weight_decay=self.opt.weight_decay)
         if self.use_pose_net:
             self.model_pose_optimizer = optim.AdamW(self.parameters_to_train_pose, self.opt.lr[3], weight_decay=self.opt.weight_decay)
@@ -154,18 +173,22 @@ class Trainer:
         num_train_samples = len(train_filenames)
         self.num_total_steps = num_train_samples // self.opt.batch_size * self.opt.num_epochs
 
-        train_dataset = self.dataset(
-            self.opt.data_path, train_filenames, self.opt.height, self.opt.width,
-            self.opt.frame_ids, 4, is_train=True, img_ext=img_ext)
-        self.train_loader = DataLoader(
-            train_dataset, self.opt.batch_size, True,
-            num_workers=self.opt.num_workers, pin_memory=True, drop_last=True)
-        val_dataset = self.dataset(
-            self.opt.data_path, val_filenames, self.opt.height, self.opt.width,
-            self.opt.frame_ids, 4, is_train=False, img_ext=img_ext)
-        self.val_loader = DataLoader(
-            val_dataset, self.opt.batch_size, True,
-            num_workers=self.opt.num_workers, pin_memory=True, drop_last=True)
+        # ------------------------ Train ------------------------
+        train_dataset = self.dataset(self.opt.data_path, train_filenames, 
+                                     self.opt.height, self.opt.width,
+                                     self.opt.frame_ids, 4, is_train=True, img_ext=img_ext)
+        
+        self.train_loader = DataLoader(train_dataset, self.opt.batch_size, True, 
+                                       num_workers=self.opt.num_workers, pin_memory=True, drop_last=True)
+        # ---------------------------------------------------------------
+        
+        # ------------------------ Validation ------------------------
+        val_dataset = self.dataset(self.opt.data_path, val_filenames, self.opt.height, self.opt.width,
+                                   self.opt.frame_ids, 4, is_train=False, img_ext=img_ext)
+        
+        self.val_loader = DataLoader(val_dataset, self.opt.batch_size, True,
+                                     num_workers=self.opt.num_workers, pin_memory=True, drop_last=True)
+        # ---------------------------------------------------------------
         self.val_iter = iter(self.val_loader)
 
         self.writers = {}
@@ -197,11 +220,13 @@ class Trainer:
 
         self.save_opts()
 
+
     def set_train(self):
         """Convert all models to training mode
         """
         for m in self.models.values():
             m.train()
+
 
     def set_eval(self):
         """Convert all models to testing/evaluation mode
@@ -209,12 +234,26 @@ class Trainer:
         for m in self.models.values():
             m.eval()
 
+
     def train(self):
         """Run the entire training pipeline
         """
         self.epoch = 0
         self.step = 0
         self.start_time = time.time()
+        
+        # Compute FLOPs
+        self.set_eval()
+        input_tensor = torch.randn(8, 3, 224, 224).to(self.device)
+        # macs = profile_macs(self.models, input_tensor)
+        macs_encoder = profile_macs(self.models['encoder'], input_tensor)
+        # macs_depth = profile_macs(self.models['depth'], input_tensor)
+        
+        encoder_flops = 2 * macs_encoder
+        # depth_flops = 2 * macs_depth# FLOPs = 2 * MACs
+        print(encoder_flops)
+        # print(depth_flops)
+        
         for self.epoch in range(self.opt.num_epochs):
             self.run_epoch()
             if (self.epoch + 1) % self.opt.save_frequency == 0:
@@ -230,9 +269,15 @@ class Trainer:
         self.model_lr_scheduler.step()
         if self.use_pose_net:
             self.model_pose_lr_scheduler.step()
-
+        
         for batch_idx, inputs in enumerate(self.train_loader):
-
+            # # --------------------- Pseudo code -------------------------
+            # rgb = inputs[("color", i, -1)] # (Batch, Channel, Height, Width)
+            # for i in range(rgb.shape[0]):
+            #     plt.imshow(rgb[i])
+            #     plt.savefig(f'./tmp{i}.png')
+            #     plt.close()
+            # # ---------------------------------------------------------
             before_op_time = time.time()
 
             outputs, losses = self.process_batch(inputs)
@@ -261,6 +306,8 @@ class Trainer:
                 self.val()
 
             self.step += 1
+
+
 
     def process_batch(self, inputs):
         """Pass a minibatch through the network and generate images and losses
@@ -361,7 +408,8 @@ class Trainer:
         """
         self.set_eval()
         try:
-            inputs = self.val_iter.next()
+            # inputs = self.val_iter.next()
+            inputs = next(self.val_iter)
         except StopIteration:
             self.val_iter = iter(self.val_loader)
             inputs = self.val_iter.next()
@@ -578,6 +626,13 @@ class Trainer:
                                   self.model_pose_optimizer.state_dict()['param_groups'][0]['lr'],
                                   batch_idx, samples_per_sec, loss,
                                   sec_to_hm_str(time_sofar), sec_to_hm_str(training_time_left)))
+        
+        with open(output_file, 'a') as f:
+            f.write(print_string.format(self.epoch,
+                                        self.model_optimizer.state_dict()['param_groups'][0]['lr'],
+                                        self.model_pose_optimizer.state_dict()['param_groups'][0]['lr'],
+                                        batch_idx, samples_per_sec, loss,
+                                        sec_to_hm_str(time_sofar), sec_to_hm_str(training_time_left)) + "\n")
 
     def log(self, mode, inputs, outputs, losses):
         """Write an event to the tensorboard events file

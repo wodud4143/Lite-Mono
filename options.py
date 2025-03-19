@@ -16,7 +16,7 @@ class LiteMonoOptions:
         self.parser.add_argument("--data_path",
                                  type=str,
                                  help="path to the training data",
-                                 default=osp.join(file_dir, "kitti_data").replace("\\","/"))
+                                 default=osp.join(file_dir, r"C:\Users\wodud\OneDrive\Desktop\Develop\Lite-Mono\kitti_data").replace("\\","/"))
         self.parser.add_argument("--log_dir",
                                  type=str,
                                  help="log directory",
@@ -26,7 +26,7 @@ class LiteMonoOptions:
         self.parser.add_argument("--model_name",
                                  type=str,
                                  help="the name of the folder to save the model in",
-                                 default="batch_12")
+                                 default="New_batch_12")
         self.parser.add_argument("--split",
                                  type=str,
                                  help="which training split to use",
@@ -167,6 +167,7 @@ class LiteMonoOptions:
         # LOADING options
         self.parser.add_argument("--load_weights_folder",
                                  type=str,
+                                 default=r"C:\Users\wodud\OneDrive\Desktop\Develop\Lite-Mono\experiments\logs\lite-mono\models\weights_49",
                                  help="name of model to load")
         self.parser.add_argument("--models_to_load",
                                  nargs="+",
