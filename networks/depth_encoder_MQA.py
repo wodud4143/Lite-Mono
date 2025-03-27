@@ -7,6 +7,31 @@ import math
 import torch.cuda
 
 
+
+# added
+class DepthwiseSeparableConv(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size=3, stride=2, padding=0, bn_act=False):
+        super().__init__()
+        self.depthwise = nn.Conv2d(in_channels, in_channels, kernel_size, padding=kernel_size//2, groups=in_channels,
+                                   stride=stride, bias=False)
+        self.pointwise = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+        self.bn_act = bn_act
+        
+        if self.bn_act:
+            # self.bn_gelu = BNGELU(out_channels)
+            self.bn_relu = BNRELU(out_channels)
+            
+
+    def forward(self, x):
+        x = self.depthwise(x)
+        x = self.pointwise(x)
+        if self.bn_act:
+            # x = self.bn_gelu(x)
+            x = self.bn_relu(x)
+        
+        return x
+
+
 class PositionalEncodingFourier(nn.Module):
     """
     Positional encoding relying on a fourier kernel matching the one used in the
@@ -45,6 +70,8 @@ class PositionalEncodingFourier(nn.Module):
         return pos
 
 
+
+# region - XCA
 class XCA(nn.Module):
     """ Cross-Covariance Attention (XCA) operation where the channels are updated using a weighted
      sum. The weights are obtained from the (softmax normalized) Cross-covariance
@@ -92,6 +119,52 @@ class XCA(nn.Module):
         return {'temperature'}
 
 
+
+# region - MQA
+class MultiQueryAttentionLayerV2(nn.Module):
+    """Multi Query Attention in PyTorch."""
+    
+    def __init__(self, num_heads, key_dim, value_dim, dropout=0.0):
+        super().__init__()
+        self.num_heads = num_heads
+        self.key_dim = key_dim
+        self.value_dim = value_dim
+        self.dropout = dropout
+        
+        self.query_proj = nn.Parameter(torch.randn(num_heads, key_dim, key_dim))
+        self.key_proj = nn.Parameter(torch.randn(key_dim, key_dim))
+        self.value_proj = nn.Parameter(torch.randn(key_dim, value_dim))
+        self.output_proj = nn.Parameter(torch.randn(key_dim, num_heads, value_dim))
+        
+        self.dropout_layer = nn.Dropout(p=dropout)
+    
+    def _reshape_input(self, t):
+        """Reshapes a tensor to three dimensions, keeping the first and last."""
+        batch_size, *spatial_dims, channels = t.shape
+        num = torch.prod(torch.tensor(spatial_dims))
+        return t.view(batch_size, num, channels)
+    
+    def forward(self, x, m):
+        """Run layer computation."""
+        reshaped_x = self._reshape_input(x)
+        reshaped_m = self._reshape_input(m)
+
+        q = torch.einsum('bnd,hkd->bnhk', reshaped_x, self.query_proj)
+        k = torch.einsum('bmd,dk->bmk', reshaped_m, self.key_proj)
+
+        logits = torch.einsum('bnhk,bmk->bnhm', q, k)
+
+        logits = logits / (self.key_dim ** 0.5)
+        attention_scores = self.dropout_layer(F.softmax(logits, dim=-1))
+
+        v = torch.einsum('bmd,dv->bmv', reshaped_m, self.value_proj)
+        o = torch.einsum('bnhm,bmv->bnhv', attention_scores, v)
+        result = torch.einsum('bnhv,dhv->bnd', o, self.output_proj)
+
+        return result.view_as(x)
+
+
+
 class LayerNorm(nn.Module):
     def __init__(self, normalized_shape, eps=1e-6, data_format="channels_last"):
         super().__init__()
@@ -115,11 +188,14 @@ class LayerNorm(nn.Module):
             return x
 
 
-class BNGELU(nn.Module):
+# region - BN+ReLU
+# class BNGELU(nn.Module):
+class BNRELU(nn.Module):
     def __init__(self, nIn):
         super().__init__()
         self.bn = nn.BatchNorm2d(nIn, eps=1e-5)
-        self.act = nn.GELU()
+        # self.act = nn.GELU()
+        self.act = nn.ReLU6()
 
     def forward(self, x):
         output = self.bn(x)
@@ -225,6 +301,8 @@ class DilatedConv(nn.Module):
         return x
 
 
+
+# region - LGFI
 class LGFI(nn.Module):
     """
     Local-Global Features Interaction
@@ -242,8 +320,11 @@ class LGFI(nn.Module):
 
         self.gamma_xca = nn.Parameter(layer_scale_init_value * torch.ones(self.dim),
                                       requires_grad=True) if layer_scale_init_value > 0 else None
-        self.xca = XCA(self.dim, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop)
-
+        
+        # self.xca = XCA(self.dim, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop)
+        self.mqa_layer = MultiQueryAttentionLayerV2(num_heads=num_heads, key_dim=self.dim, value_dim=self.dim ,dropout=0.1)
+        
+        
         self.norm = LayerNorm(self.dim, eps=1e-6)
         self.pwconv1 = nn.Linear(self.dim, expan_ratio * self.dim)
         self.act = nn.GELU()
@@ -255,17 +336,28 @@ class LGFI(nn.Module):
     def forward(self, x):
         input_ = x
 
-        # XCA
+        # XCA (Convert XCA to MQA)
         B, C, H, W = x.shape
-        x = x.reshape(B, C, H * W).permute(0, 2, 1)
-
+        x = x.reshape(B, C, H * W).permute(0, 2, 1)  
         if self.pos_embd:
             pos_encoding = self.pos_embd(B, H, W).reshape(B, -1, x.shape[1]).permute(0, 2, 1)
             x = x + pos_encoding
-
-        x = x + self.gamma_xca * self.xca(self.norm_xca(x))
+        
+        # region MQA featuresize
+        _,HW,_ = x.shape
+        
+        # 2개의 x 중에서 하나의 x에 se block (channel-attention) 적용해서 연산해보기.
+        if HW != 7680:
+        # x = self.mqa_layer(x, x)
+            x_mqa = self.mqa_layer(x, x)
+            # x += x_mqa
+        # x = x + self.gamma_xca * self.xca(self.norm_xca(x))
 
         x = x.reshape(B, H, W, C)
+        # feature fusion
+        if HW != 7680:
+            x_mqa = x_mqa.reshape(B, H, W, C)
+            x = x + x_mqa
 
         # Inverted Bottleneck
         x = self.norm(x)
@@ -295,6 +387,7 @@ class AvgPool(nn.Module):
         return x
 
 
+# region - LiteMono
 class LiteMono(nn.Module):
     """
     Lite-Mono
@@ -303,25 +396,26 @@ class LiteMono(nn.Module):
     # use_pos_embd_xca=[True, False, False] 위치 임베딩 -> 초기 스테이지에서는 위치 정보가 중요 why? 뒤로 갈수록 위치 정보가 덜 중요 -> 해상도가 낮아져서 픽셀당 정보가 많아서?
     # heads=[8, 8, 8] 무슨의미인지 모르겠음 
     def __init__(self, in_chans=3, model='lite-mono', height=192, width=640,
-                 global_block=[1, 1, 1, 1], global_block_type=['LGFI', 'LGFI', 'LGFI', 'LGFI'],
+                 global_block=[1, 1, 1], global_block_type=['LGFI', 'LGFI', 'LGFI'],
                  drop_path_rate=0.2, layer_scale_init_value=1e-6, expan_ratio=6,
-                 heads=[8, 8, 8, 8], use_pos_embd_xca=[True, False, False, False], **kwargs):
+                 heads=[8, 8, 8], use_pos_embd_xca=[True, False, False], **kwargs):
 
         super().__init__()
 
         if model == 'lite-mono':
             # self.num_ch_enc = np.array([48, 80, 128]) 무슨 의미지인 모르겠음 
-            self.num_ch_enc = np.array([48, 80, 128, 168])
+            self.num_ch_enc = np.array([48, 80, 128])
             # Feature map - channel:48 ==> (8, 48, 64, 64)
             # 즉, 48은 convolution kernel의 개수 
             
-            # self.depth = [4, 4, 10]
-            self.depth = [4, 4, 10, 8]
-            # self.dims = [48, 80, 128]
-            self.dims = [48, 80, 128, 168]
+          
+            self.depth = [4, 4, 10]
+            
+            self.dims = [48, 80, 128]
+            # if height == 192 and width == 640:
             if height == 192 and width == 640:
-                # self.dilation = [[1, 2, 3], [1, 2, 3], [1, 2, 3, 1, 2, 3, 2, 4, 6]]
-                self.dilation = [[1, 2, 3], [1, 2, 3], [1, 2, 3, 1, 2, 3, 2, 4, 6],[2, 4, 6, 8, 4, 8, 12]]
+                self.dilation = [[1, 2, 3], [1, 2, 3], [1, 2, 3, 1, 2, 3, 2, 4, 6]]
+                # self.dilation = [[1, 1, 2], [1, 1, 2], [1, 1, 2, 1, 1, 2, 1, 2, 3]]
             elif height == 320 and width == 1024:
                 self.dilation = [[1, 2, 5], [1, 2, 5], [1, 2, 5, 1, 2, 5, 2, 4, 10]]
 
@@ -356,15 +450,25 @@ class LiteMono(nn.Module):
             assert g in ['None', 'LGFI']
 
         self.downsample_layers = nn.ModuleList()  # stem and 3 intermediate downsampling conv layers
+        # stem1 = nn.Sequential(
+        #     Conv(in_chans, self.dims[0], kSize=3, stride=2, padding=1, bn_act=True),
+        #     Conv(self.dims[0], self.dims[0], kSize=3, stride=1, padding=1, bn_act=True),
+        #     Conv(self.dims[0], self.dims[0], kSize=3, stride=1, padding=1, bn_act=True),
+        # )
         stem1 = nn.Sequential(
-            Conv(in_chans, self.dims[0], kSize=3, stride=2, padding=1, bn_act=True),
-            Conv(self.dims[0], self.dims[0], kSize=3, stride=1, padding=1, bn_act=True),
-            Conv(self.dims[0], self.dims[0], kSize=3, stride=1, padding=1, bn_act=True),
+            DepthwiseSeparableConv(in_channels=in_chans, out_channels=self.dims[0], kernel_size=3, stride=2, bn_act=True),
+            DepthwiseSeparableConv(in_channels=self.dims[0], out_channels=self.dims[0], kernel_size=3, stride=1, bn_act=True),
+            DepthwiseSeparableConv(in_channels=self.dims[0], out_channels=self.dims[0], kernel_size=3, stride=1, bn_act=True),
         )
 
+        # self.stem2 = nn.Sequential(
+        #     Conv(self.dims[0]+3, self.dims[0], kSize=3, stride=2, padding=1, bn_act=False),
+        # )
+        
         self.stem2 = nn.Sequential(
-            Conv(self.dims[0]+3, self.dims[0], kSize=3, stride=2, padding=1, bn_act=False),
+            DepthwiseSeparableConv(in_channels = self.dims[0]+3, out_channels = self.dims[0], kernel_size=3, stride=2, bn_act=False),
         )
+
 
         self.downsample_layers.append(stem1)
 
@@ -373,9 +477,14 @@ class LiteMono(nn.Module):
             self.input_downsample.append(AvgPool(i))
 
         # for i in range(2):
-        for i in range(3):
+        #     downsample_layer = nn.Sequential(
+        #         Conv(self.dims[i]*2+3, self.dims[i+1], kSize=3, stride=2, padding=1, bn_act=False),
+        #     )
+        #     self.downsample_layers.append(downsample_layer)
+        
+        for i in range(2):
             downsample_layer = nn.Sequential(
-                Conv(self.dims[i]*2+3, self.dims[i+1], kSize=3, stride=2, padding=1, bn_act=False),
+                DepthwiseSeparableConv(in_channels = self.dims[i]*2+3, out_channels = self.dims[i+1], kernel_size=3, stride=2, bn_act=False),
             )
             self.downsample_layers.append(downsample_layer)
 
@@ -384,7 +493,7 @@ class LiteMono(nn.Module):
         dp_rates = [x.item() for x in torch.linspace(0, drop_path_rate, sum(self.depth))]
         cur = 0
         # for i in range(3):
-        for i in range(4):
+        for i in range(3):
             stage_blocks = []
             for j in range(self.depth[i]):
                 if j > self.depth[i] - global_block[i] - 1:
@@ -419,6 +528,7 @@ class LiteMono(nn.Module):
             nn.init.constant_(m.weight, 1)
             nn.init.constant_(m.bias, 0)
 
+
     def forward_features(self, x):
         features = []
         x = (x - 0.45) / 0.225
@@ -445,7 +555,7 @@ class LiteMono(nn.Module):
         # feature map 4 : (8, x, 6, 20) 생성.
         
         # for i in range(1, 3):
-        for i in range(1, 4):
+        for i in range(1, 3):
             tmp_x.append(x_down[i])
             x = torch.cat(tmp_x, dim=1)
             x = self.downsample_layers[i](x)
