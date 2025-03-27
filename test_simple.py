@@ -26,12 +26,12 @@ def parse_args():
 
     parser.add_argument('--image_path', type=str, nargs='+',
                         help='path to a test image or folder of images',
-                        default=direct()
+                        default= direct()
                         )# required=True
 
     parser.add_argument('--load_weights_folder', type=str,
                         help='path of a pretrained model to use',
-                        default=r'C:\Users\wodud\OneDrive\Desktop\Develop\Lite-Mono\experiments\logs\lite-mono\models\weights_49'
+                        default=r"C:\Users\wodud\OneDrive\Desktop\Develop\Lite-Mono\lite-mono-8m_1024x320"
                         )
 
     parser.add_argument('--test',
@@ -42,7 +42,7 @@ def parse_args():
 
     parser.add_argument('--model', type=str,
                         help='name of a pretrained model to use',
-                        default="lite-mono", #lite-mono
+                        default="lite-mono-8m", #lite-mono
                         choices=[
                             "lite-mono",
                             "lite-mono-small",
@@ -100,9 +100,9 @@ def test_simple(args):
     depth_decoder.to(device)
     depth_decoder.eval()
     
-    '''
-    하위 디렉토리 많을때
-    '''
+    # '''
+    # 하위 디렉토리 많을때
+    # '''
     for image_folder in args.image_path:
         # FINDING INPUT IMAGES
         if os.path.isfile(image_folder) and not args.test:
@@ -315,7 +315,7 @@ def test_simple(args):
 
 def direct():
 
-    directory = r"C:\Users\wodud\OneDrive\Desktop\도로주행 데이터\lite-mono\2011_09_28" 
+    directory = r"C:\Users\wodud\OneDrive\Desktop\도로주행 데이터\test" 
 
     folders = [os.path.join(directory, f) for f in os.listdir(directory) if os.path.isdir(os.path.join(directory, f))]
 
