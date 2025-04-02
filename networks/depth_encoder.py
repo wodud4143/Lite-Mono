@@ -299,9 +299,6 @@ class LiteMono(nn.Module):
     """
     Lite-Mono
     """
-    # global_block=[1, 1, 1], global_block_type=['LGFI', 'LGFI', 'LGFI']
-    # use_pos_embd_xca=[True, False, False] 위치 임베딩 -> 초기 스테이지에서는 위치 정보가 중요 why? 뒤로 갈수록 위치 정보가 덜 중요 -> 해상도가 낮아져서 픽셀당 정보가 많아서?
-    # heads=[8, 8, 8] 무슨의미인지 모르겠음 
     def __init__(self, in_chans=3, model='lite-mono', height=192, width=640,
                  global_block=[1, 1, 1], global_block_type=['LGFI', 'LGFI', 'LGFI'],
                  drop_path_rate=0.2, layer_scale_init_value=1e-6, expan_ratio=6,
@@ -310,7 +307,6 @@ class LiteMono(nn.Module):
         super().__init__()
 
         if model == 'lite-mono':
-            # self.num_ch_enc = np.array([48, 80, 128]) 무슨 의미지인 모르겠음 
             self.num_ch_enc = np.array([48, 80, 128])
             # Feature map - channel:48 ==> (8, 48, 64, 64)
             # 즉, 48은 convolution kernel의 개수 

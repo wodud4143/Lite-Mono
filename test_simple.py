@@ -315,7 +315,7 @@ def test_simple(args):
 
 def direct():
 
-    directory = r"C:\Users\wodud\OneDrive\Desktop\도로주행 데이터\test" 
+    directory = r"C:\Users\wodud\OneDrive\Desktop\도로주행 데이터\8m\2011_09_28"
 
     folders = [os.path.join(directory, f) for f in os.listdir(directory) if os.path.isdir(os.path.join(directory, f))]
 

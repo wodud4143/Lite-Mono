@@ -69,7 +69,23 @@ class PositionalEncodingFourier(nn.Module):
         pos = self.token_projection(pos)
         return pos
 
+# region SEBLCOK
+class SEBlock(nn.Module):
+    def __init__(self, c, r=16):
+        super().__init__()
+        self.squeeze = nn.AdaptiveAvgPool2d(1)
+        self.excitation = nn.Sequential(
+            nn.Linear(c, c // r, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(c // r, c, bias=False),
+            nn.Sigmoid()
+        )
 
+    def forward(self, x):
+        bs, c, _, _ = x.shape
+        y = self.squeeze(x).view(bs, c)
+        y = self.excitation(y).view(bs, c, 1, 1)
+        return x * y.expand_as(x)
 
 # region - XCA
 class XCA(nn.Module):
@@ -323,6 +339,8 @@ class LGFI(nn.Module):
         
         # self.xca = XCA(self.dim, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop)
         self.mqa_layer = MultiQueryAttentionLayerV2(num_heads=num_heads, key_dim=self.dim, value_dim=self.dim ,dropout=0.1)
+        #seblock
+        self.se_block = SEBlock(c=self.dim)
         
         
         self.norm = LayerNorm(self.dim, eps=1e-6)
@@ -334,30 +352,47 @@ class LGFI(nn.Module):
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
     def forward(self, x):
+        # Input resolution: 192 x 640
+        # Stage 2: (48 x 160)
+        # Stage 3: (24 x 80)
+        # Stage 4: (12 x 40)
         input_ = x
-
+        
         # XCA (Convert XCA to MQA)
         B, C, H, W = x.shape
+        # if H*W != 7680:
+        #     seblock_x = self.se_block(x)
+        stage3_size = 1920 # 480
+        if H*W == stage3_size:
+            seblock_x = self.se_block(x)
+        
         x = x.reshape(B, C, H * W).permute(0, 2, 1)  
         if self.pos_embd:
             pos_encoding = self.pos_embd(B, H, W).reshape(B, -1, x.shape[1]).permute(0, 2, 1)
             x = x + pos_encoding
         
+        # if H*W != 7680:
+        if H*W == stage3_size:
+            seblock_x = seblock_x.reshape(B, C, H * W).permute(0, 2, 1)  
+            if self.pos_embd:
+                pos_encoding = self.pos_embd(B, H, W).reshape(B, -1, x.shape[1]).permute(0, 2, 1)
+                seblock_x = seblock_x + pos_encoding
+        
         # region MQA featuresize
         _,HW,_ = x.shape
         
         # 2개의 x 중에서 하나의 x에 se block (channel-attention) 적용해서 연산해보기.
-        if HW != 7680:
-        # x = self.mqa_layer(x, x)
-            x_mqa = self.mqa_layer(x, x)
-            # x += x_mqa
+        # if HW != 7680:
+        if HW == stage3_size:
+            # x_mqa = self.mqa_layer(x, seblock_x)
+            x_mqa = self.mqa_layer(seblock_x, x)
         # x = x + self.gamma_xca * self.xca(self.norm_xca(x))
 
         x = x.reshape(B, H, W, C)
-        # feature fusion
-        if HW != 7680:
-            x_mqa = x_mqa.reshape(B, H, W, C)
-            x = x + x_mqa
+        # # feature fusion
+        # if HW != 7680:
+        #     x_mqa = x_mqa.reshape(B, H, W, C)
+        #     x = x + x_mqa
 
         # Inverted Bottleneck
         x = self.norm(x)
@@ -492,7 +527,7 @@ class LiteMono(nn.Module):
         self.stages = nn.ModuleList()
         dp_rates = [x.item() for x in torch.linspace(0, drop_path_rate, sum(self.depth))]
         cur = 0
-        # for i in range(3):
+
         for i in range(3):
             stage_blocks = []
             for j in range(self.depth[i]):
@@ -554,7 +589,6 @@ class LiteMono(nn.Module):
         # feature map 3 : (8, 128, 12, 40)
         # feature map 4 : (8, x, 6, 20) 생성.
         
-        # for i in range(1, 3):
         for i in range(1, 3):
             tmp_x.append(x_down[i])
             x = torch.cat(tmp_x, dim=1)

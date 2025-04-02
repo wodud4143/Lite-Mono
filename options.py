@@ -167,7 +167,6 @@ class LiteMonoOptions:
         # LOADING options
         self.parser.add_argument("--load_weights_folder",
                                  type=str,
-                                 default=r"C:\Users\wodud\OneDrive\Desktop\Develop\Lite-Mono\experiments\logs\lite-mono\models\weights_49",
                                  help="name of model to load")
         self.parser.add_argument("--models_to_load",
                                  nargs="+",
