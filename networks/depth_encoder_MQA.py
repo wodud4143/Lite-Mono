@@ -5,31 +5,8 @@ import torch.nn.functional as F
 from timm.models.layers import DropPath
 import math
 import torch.cuda
+from .model_utils import Conv, DepthwiseSeparableConv
 
-
-
-# added
-class DepthwiseSeparableConv(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=3, stride=2, padding=0, bn_act=False):
-        super().__init__()
-        self.depthwise = nn.Conv2d(in_channels, in_channels, kernel_size, padding=kernel_size//2, groups=in_channels,
-                                   stride=stride, bias=False)
-        self.pointwise = nn.Conv2d(in_channels, out_channels, kernel_size=1)
-        self.bn_act = bn_act
-        
-        if self.bn_act:
-            # self.bn_gelu = BNGELU(out_channels)
-            self.bn_relu = BNRELU(out_channels)
-            
-
-    def forward(self, x):
-        x = self.depthwise(x)
-        x = self.pointwise(x)
-        if self.bn_act:
-            # x = self.bn_gelu(x)
-            x = self.bn_relu(x)
-        
-        return x
 
 
 class PositionalEncodingFourier(nn.Module):
@@ -204,44 +181,6 @@ class LayerNorm(nn.Module):
             return x
 
 
-# region - BN+ReLU
-# class BNGELU(nn.Module):
-class BNRELU(nn.Module):
-    def __init__(self, nIn):
-        super().__init__()
-        self.bn = nn.BatchNorm2d(nIn, eps=1e-5)
-        # self.act = nn.GELU()
-        self.act = nn.ReLU6()
-
-    def forward(self, x):
-        output = self.bn(x)
-        output = self.act(output)
-
-        return output
-
-
-class Conv(nn.Module):
-    def __init__(self, nIn, nOut, kSize, stride, padding=0, dilation=(1, 1), groups=1, bn_act=False, bias=False):
-        super().__init__()
-
-        self.bn_act = bn_act
-
-        self.conv = nn.Conv2d(nIn, nOut, kernel_size=kSize,
-                              stride=stride, padding=padding,
-                              dilation=dilation, groups=groups, bias=bias)
-
-        if self.bn_act:
-            self.bn_gelu = BNGELU(nOut)
-
-    def forward(self, x):
-        output = self.conv(x)
-
-        if self.bn_act:
-            output = self.bn_gelu(output)
-
-        return output
-
-
 class CDilated(nn.Module):
     """
     This class defines the dilated convolution.
@@ -386,8 +325,10 @@ class LGFI(nn.Module):
         if HW == stage3_size:
             # x_mqa = self.mqa_layer(x, seblock_x)
             x_mqa = self.mqa_layer(seblock_x, x)
+            x = x_mqa
         # x = x + self.gamma_xca * self.xca(self.norm_xca(x))
-
+        
+           
         x = x.reshape(B, H, W, C)
         # # feature fusion
         # if HW != 7680:
@@ -427,27 +368,17 @@ class LiteMono(nn.Module):
     """
     Lite-Mono
     """
-    # global_block=[1, 1, 1], global_block_type=['LGFI', 'LGFI', 'LGFI']
-    # use_pos_embd_xca=[True, False, False] 위치 임베딩 -> 초기 스테이지에서는 위치 정보가 중요 why? 뒤로 갈수록 위치 정보가 덜 중요 -> 해상도가 낮아져서 픽셀당 정보가 많아서?
-    # heads=[8, 8, 8] 무슨의미인지 모르겠음 
     def __init__(self, in_chans=3, model='lite-mono', height=192, width=640,
                  global_block=[1, 1, 1], global_block_type=['LGFI', 'LGFI', 'LGFI'],
                  drop_path_rate=0.2, layer_scale_init_value=1e-6, expan_ratio=6,
                  heads=[8, 8, 8], use_pos_embd_xca=[True, False, False], **kwargs):
-
         super().__init__()
 
         if model == 'lite-mono':
-            # self.num_ch_enc = np.array([48, 80, 128]) 무슨 의미지인 모르겠음 
             self.num_ch_enc = np.array([48, 80, 128])
-            # Feature map - channel:48 ==> (8, 48, 64, 64)
-            # 즉, 48은 convolution kernel의 개수 
-            
-          
             self.depth = [4, 4, 10]
             
             self.dims = [48, 80, 128]
-            # if height == 192 and width == 640:
             if height == 192 and width == 640:
                 self.dilation = [[1, 2, 3], [1, 2, 3], [1, 2, 3, 1, 2, 3, 2, 4, 6]]
                 # self.dilation = [[1, 1, 2], [1, 1, 2], [1, 1, 2, 1, 1, 2, 1, 2, 3]]
@@ -511,18 +442,17 @@ class LiteMono(nn.Module):
         for i in range(1, 5):
             self.input_downsample.append(AvgPool(i))
 
-        # for i in range(2):
-        #     downsample_layer = nn.Sequential(
-        #         Conv(self.dims[i]*2+3, self.dims[i+1], kSize=3, stride=2, padding=1, bn_act=False),
-        #     )
-        #     self.downsample_layers.append(downsample_layer)
-        
         for i in range(2):
             downsample_layer = nn.Sequential(
-                DepthwiseSeparableConv(in_channels = self.dims[i]*2+3, out_channels = self.dims[i+1], kernel_size=3, stride=2, bn_act=False),
+                Conv(self.dims[i]*2+3, self.dims[i+1], kSize=3, dilation=5,
+                     stride=2, padding=5, bn_act=False), #padding=1,
+                # dilation formula: r = k + d - 1
+                # Trick
+                # Resize를 해서 image resolution을 매우 작게 만든다. 
+                # Inverted Bottleneck layer 1개 + Conv 1개
             )
             self.downsample_layers.append(downsample_layer)
-
+        
         # ------------------------------ Stage 시작 ------------------------------ 
         self.stages = nn.ModuleList()
         dp_rates = [x.item() for x in torch.linspace(0, drop_path_rate, sum(self.depth))]

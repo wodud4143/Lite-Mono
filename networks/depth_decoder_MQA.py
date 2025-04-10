@@ -61,9 +61,10 @@ class DepthDecoder(nn.Module):
         self.num_ch_enc = num_ch_enc
         self.num_ch_dec = (self.num_ch_enc / 2).astype('int')
 
-        num_heads = 4
-        self.dim = 48
+        num_heads = 8
+        self.dim = 128
         self.mqa_layer = MultiQueryAttentionLayerV2(num_heads=num_heads, key_dim=self.dim, value_dim=self.dim ,dropout=0.1)
+        self.mqa_layer = self.mqa_layer.cuda()
         
         # decoder
         self.convs = OrderedDict()
@@ -98,7 +99,6 @@ class DepthDecoder(nn.Module):
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
                 
-    #nn모듈에서 forward가 기본 실행 함수? 
     def forward(self, input_features):
         self.outputs = {}
         x = input_features[-1]
@@ -106,7 +106,7 @@ class DepthDecoder(nn.Module):
         B, C, H, W = x.shape
         reshaped_x = x.reshape(B, C, H*W).permute(0, 2, 1)
         mqa_x = self.mqa_layer(reshaped_x, reshaped_x)
-        x = mqa_x.reshape(B, H, W, C)
+        x = mqa_x.reshape(B, C, H, W)
         
         for i in range(2, -1, -1):
             x = self.convs[("upconv", i, 0)](x)
